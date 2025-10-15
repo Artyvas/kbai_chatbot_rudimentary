@@ -1,4 +1,3 @@
-
 NAMES = [
     #region Names
     'Serena', 'Andrew', 'Bobbie', 'Cason', 'David', 'Farzana', 'Frank', 'Hannah', 'Ida', 'Irene', 'Jim', 'Jose', 'Keith', 'Laura', 'Lucy', 'Meredith', 'Nick', 'Ada', 'Yeeling', 'Yan'
@@ -27,7 +26,10 @@ ADVS = set(
             ['about', 'above', 'aboveest', 'again', 'ago', 'all', 'also', 'always', 'back', 'behind', 'birdest', 'cameest', 'careest', 'childrenest', 'clear', 'close', 'darkest', 'deeply', "dog'sest", "don'test", 'down', 'early', 'enough', 'even', 'ever', 'far', 'fast', 'feeter', 'first', 'firster', 'fiveest', 'halfest', 'handest', 'hard', 'hearest', 'heatest', 'here', 'hereest', 'higher', 'hourest', 'just', 'kind', 'late', 'less', 'lighter', 'likeer', 'lister', 'listest', 'live', 'liveest', 'long', 'mainest', 'makeest', 'mightest', 'minuteest', 'more', 'moreed', 'most', 'near', 'never', 'noticeest', 'now', 'of', 'often', 'once', 'only', 'out', 'over', 'partest', 'perhaps', 'perhapsest', 'plain', 'playest', 'pullest', 'quick', 'rockest', 'shipest', 'simpleest', 'singsest', 'sizeest', 'so', 'someest', 'soon', 'specialing', 'starer', 'still', 'streetest', 'sure', 'testest', 'then', 'there', 'thinkest', 'together', 'too', 'top', 'towardest', 'up', 'very', 'well', 'wester', 'withest', 'worder', 'worldest', 'yet']
             #endregion
             )
-# ===== Helpers & Normalization (no external libs at runtime) =====
+PRONOUN_SUBJ = {"i","you","he","she","we","they"}
+PRONOUN_OBJ = {"me","you","him","her","us","them"}
+AUX_SET = {"will","do","does","did","be","am","is","are","was","were","have","has","had",
+           "can","could","should","would","may","might","must"}
 import re
 import unicodedata
 
@@ -68,21 +70,33 @@ def normalize(text: str):
     return toks, [_lemmatize_token(t) for t in toks]
 
 def extract_facts(tokens, lemmas):
-    """
-    Minimal who-did-what-to-whom/where/when extractor.
-    """
-    # main verb: first lemma in VERBS
-    verb = next((l for l in lemmas if l in VERBS), None)
+    # pick a main/content verb (skip auxiliaries if possible)
+    verb = next((l for l in lemmas if l in VERBS and l not in AUX_SET), None)
+    if verb is None:
+        verb = next((l for l in lemmas if l in VERBS), None)
 
-    # subjects: names left of verb (fallback to first name)
+    # subjects
     if verb:
         v_idx = lemmas.index(verb)
-        subjects = [t for i, t in enumerate(tokens[:v_idx]) if _is_name(t)]
+        subjects = []
+        for i, t in enumerate(tokens[:v_idx]):
+            if _is_name(t):
+                subjects.append(t)
+            else:
+                # allow pronoun subjects
+                if _lemmatize_token(t) in PRONOUN_SUBJ:
+                    subjects.append(t)
+        # keep only the first subject for simplicity
+        if subjects:
+            subjects = subjects[:1]
     else:
-        subjects = [t for t in tokens if _is_name(t)]
-        subjects = subjects[:1]
+        # no verb found: fall back to first name or pronoun anywhere
+        subjects = []
+        for t in tokens:
+            if _is_name(t) or _lemmatize_token(t) in PRONOUN_SUBJ:
+                subjects = [t]
+                break
 
-    # time anywhere in the sentence
     time_tok = next((t for t in tokens if TIME_RE.match(t)), None)
 
     direct_obj = None
@@ -92,13 +106,28 @@ def extract_facts(tokens, lemmas):
 
     if verb:
         v_idx = lemmas.index(verb)
+
+        # LEFT-side adjective capture (unchanged)
+        left = list(zip(tokens[:v_idx], lemmas[:v_idx]))
+        i = 0
+        while i < len(left):
+            tok, lem = left[i]
+            if lem in ADJS and i + 1 < len(left):
+                n_tok, n_lem = left[i+1]
+                if n_lem in NOUNS or _is_name(n_tok):
+                    adjectives_of.setdefault(n_tok, []).append(tok)
+                    i += 2
+                    continue
+            i += 1
+
+        # RIGHT side scan
         right = list(zip(tokens[v_idx+1:], lemmas[v_idx+1:]))
 
         i = 0
         while i < len(right):
             tok, lem = right[i]
 
-            # Adj directly before a noun/name → attach adj and prefer the noun as DO
+            # adjective + noun (prefer the noun as the direct object)
             if lem in ADJS and i + 1 < len(right):
                 n_tok, n_lem = right[i+1]
                 if n_lem in NOUNS or _is_name(n_tok):
@@ -108,22 +137,26 @@ def extract_facts(tokens, lemmas):
                     i += 2
                     continue
 
-            # Standalone noun/name as DO (skip pure numbers like "one")
+            # capture ditransitive pronoun recipient (e.g., "write him a letter")
+            if indirect_obj is None and _lemmatize_token(tok) in PRONOUN_OBJ:
+                indirect_obj = tok
+
+            # first standalone noun/name as fallback direct object (avoid numbers)
             if direct_obj is None:
                 if (lem in NOUNS or _is_name(tok)) and (tok.lower() not in NUMBER_WORDS) and (not tok.isdigit()):
                     direct_obj = tok
 
-            # Recipient / destination
+            # prepositions -> iobj/destination
             if lem == "to" and i + 1 < len(right):
                 nxt_tok, nxt_lem = right[i+1]
-                if _is_name(nxt_tok):
+                if _is_name(nxt_tok) or _lemmatize_token(nxt_tok) in PRONOUN_OBJ:
                     indirect_obj = nxt_tok
                 elif nxt_lem in NOUNS:
                     dest_to_noun = nxt_tok
 
             if lem == "for" and i + 1 < len(right):
                 nxt_tok, _ = right[i+1]
-                if _is_name(nxt_tok):
+                if _is_name(nxt_tok) or _lemmatize_token(nxt_tok) in PRONOUN_OBJ:
                     indirect_obj = nxt_tok
 
             i += 1
@@ -138,7 +171,6 @@ def extract_facts(tokens, lemmas):
         "prep_to": dest_to_noun,
     }
 
-
 def answer_question(facts, sent_tokens, sent_lemmas, q_tokens, q_lemmas):
     subj = facts["subjects"][0] if facts["subjects"] else None
     dobj = facts["direct_object"]
@@ -147,37 +179,18 @@ def answer_question(facts, sent_tokens, sent_lemmas, q_tokens, q_lemmas):
     dest = facts["prep_to"]
     adjs = facts["adjectives_of"]
 
-    # Recipient (to/for) before generic WHO
     if "who" in q_lemmas and ("to" in q_lemmas or "for" in q_lemmas):
         if iobj:
             return iobj
 
-    # WHO (generic; if one name in Q, return the other subject)
-    if "who" in q_lemmas:
-        names_in_q = [t for t in q_tokens if _is_name(t)]
-        if len(names_in_q) == 1:
-            others = [n for n in facts["subjects"] if n != names_in_q[0]]
-            if others:
-                return others[0]
-        if subj:
-            return subj
-
-    # WHAT → the head noun
-    if "what" in q_lemmas:
-        if dobj:
-            return dobj
-
-    # WHERE
-    if "where" in q_lemmas:
-        if dest:
-            return dest
-
-    # WHEN / "what time"
     if "when" in q_lemmas or ("what" in q_lemmas and "time" in q_lemmas):
         if time_tok:
             return time_tok
 
-    # HOW FAR
+    if "where" in q_lemmas:
+        if dest:
+            return dest
+
     if "how" in q_lemmas and ("far" in q_lemmas or "distance" in q_lemmas):
         for i, l in enumerate(sent_lemmas):
             if l == "mile":
@@ -187,17 +200,13 @@ def answer_question(facts, sent_tokens, sent_lemmas, q_tokens, q_lemmas):
                     return f"{prev_tok} mile"
                 return "mile"
 
-    # HOW LONG → adjective attached to the noun mentioned (or to DO)
     if "how" in q_lemmas and "long" in q_lemmas:
-        # If question names the noun (e.g., "note"), use that
         for t in q_tokens:
             if t in adjs and adjs[t]:
                 return adjs[t][-1]
-        # else fall back to adjective of DO
         if dobj and dobj in adjs and adjs[dobj]:
             return adjs[dobj][-1]
 
-    # Generic HOW (manner): return the surface verb (e.g., "walk")
     if "how" in q_lemmas:
         if facts["verb"]:
             for t, l in zip(sent_tokens, sent_lemmas):
@@ -205,7 +214,28 @@ def answer_question(facts, sent_tokens, sent_lemmas, q_tokens, q_lemmas):
                     return t
             return facts["verb"]
 
-    # Fallbacks
+    if "who" in q_lemmas:
+        names_in_q = [t for t in q_tokens if _is_name(t)]
+        if len(names_in_q) == 1:
+            others = [n for n in facts["subjects"] if n != names_in_q[0]]
+            if others:
+                return others[0]
+        if subj:
+            return subj
+        
+    if "what" in q_lemmas:
+      q_adjs = [l for l in q_lemmas if l in ADJS]
+      if q_adjs:
+          for q_adj in q_adjs:
+              for noun_tok, adj_toks in adjs.items():
+                  # compare using our lemmatizer for robustness
+                  if any(_lemmatize_token(a) == q_adj for a in adj_toks):
+                      return noun_tok
+
+    if "what" in q_lemmas and "time" not in q_lemmas:
+        if dobj:
+            return dobj
+
     if dobj:
         return dobj
     if subj:
