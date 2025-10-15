@@ -25,6 +25,9 @@ def test():
     sentence_4 = "She will write him a love letter."
     question_11 = "Who wrote a love letter?"
 
+    sentence_5 = "Serena and Ada took the blue rock to the street."
+    question_12 = "Where did they take the rock?"
+
 
     print(test_agent.solve(sentence_1, question_1))  # "Ada"
     print(test_agent.solve(sentence_1, question_2))  # "note" or "a note"
@@ -40,6 +43,8 @@ def test():
     print(test_agent.solve(sentence_3, question_10))  # "horse"
 
     print(test_agent.solve(sentence_4, question_11))  # "She"
+
+    print(test_agent.solve(sentence_5, question_12))  # "street"
 
 if __name__ == "__main__":
     test()

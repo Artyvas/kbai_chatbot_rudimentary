@@ -30,6 +30,7 @@ PRONOUN_SUBJ = {"i","you","he","she","we","they"}
 PRONOUN_OBJ = {"me","you","him","her","us","them"}
 AUX_SET = {"will","do","does","did","be","am","is","are","was","were","have","has","had",
            "can","could","should","would","may","might","must"}
+DET_SET = {"the", "a", "an"}
 import re
 import unicodedata
 
@@ -69,13 +70,28 @@ def normalize(text: str):
     toks = s.split()
     return toks, [_lemmatize_token(t) for t in toks]
 
+def _scan_np_head(pairs, start_idx):
+    """
+    Given a list of (tok, lem) pairs and a start index,
+    return the first token that is a name or noun,
+    skipping determiners and any intervening non-noun tokens.
+    """
+    k = start_idx
+    while k < len(pairs):
+        tok, lem = pairs[k]
+        if lem in DET_SET:
+            k += 1
+            continue
+        if _is_name(tok) or lem in NOUNS:
+            return tok, lem
+        k += 1
+    return None, None
+
 def extract_facts(tokens, lemmas):
-    # pick a main/content verb (skip auxiliaries if possible)
     verb = next((l for l in lemmas if l in VERBS and l not in AUX_SET), None)
     if verb is None:
         verb = next((l for l in lemmas if l in VERBS), None)
 
-    # subjects
     if verb:
         v_idx = lemmas.index(verb)
         subjects = []
@@ -83,14 +99,11 @@ def extract_facts(tokens, lemmas):
             if _is_name(t):
                 subjects.append(t)
             else:
-                # allow pronoun subjects
                 if _lemmatize_token(t) in PRONOUN_SUBJ:
                     subjects.append(t)
-        # keep only the first subject for simplicity
         if subjects:
             subjects = subjects[:1]
     else:
-        # no verb found: fall back to first name or pronoun anywhere
         subjects = []
         for t in tokens:
             if _is_name(t) or _lemmatize_token(t) in PRONOUN_SUBJ:
@@ -107,7 +120,6 @@ def extract_facts(tokens, lemmas):
     if verb:
         v_idx = lemmas.index(verb)
 
-        # LEFT-side adjective capture (unchanged)
         left = list(zip(tokens[:v_idx], lemmas[:v_idx]))
         i = 0
         while i < len(left):
@@ -120,14 +132,12 @@ def extract_facts(tokens, lemmas):
                     continue
             i += 1
 
-        # RIGHT side scan
         right = list(zip(tokens[v_idx+1:], lemmas[v_idx+1:]))
 
         i = 0
         while i < len(right):
             tok, lem = right[i]
 
-            # adjective + noun (prefer the noun as the direct object)
             if lem in ADJS and i + 1 < len(right):
                 n_tok, n_lem = right[i+1]
                 if n_lem in NOUNS or _is_name(n_tok):
@@ -137,16 +147,13 @@ def extract_facts(tokens, lemmas):
                     i += 2
                     continue
 
-            # capture ditransitive pronoun recipient (e.g., "write him a letter")
             if indirect_obj is None and _lemmatize_token(tok) in PRONOUN_OBJ:
                 indirect_obj = tok
 
-            # first standalone noun/name as fallback direct object (avoid numbers)
             if direct_obj is None:
                 if (lem in NOUNS or _is_name(tok)) and (tok.lower() not in NUMBER_WORDS) and (not tok.isdigit()):
                     direct_obj = tok
 
-            # prepositions -> iobj/destination
             if lem == "to" and i + 1 < len(right):
                 nxt_tok, nxt_lem = right[i+1]
                 if _is_name(nxt_tok) or _lemmatize_token(nxt_tok) in PRONOUN_OBJ:
@@ -228,7 +235,6 @@ def answer_question(facts, sent_tokens, sent_lemmas, q_tokens, q_lemmas):
       if q_adjs:
           for q_adj in q_adjs:
               for noun_tok, adj_toks in adjs.items():
-                  # compare using our lemmatizer for robustness
                   if any(_lemmatize_token(a) == q_adj for a in adj_toks):
                       return noun_tok
 
